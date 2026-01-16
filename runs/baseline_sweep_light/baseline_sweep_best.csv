@@ -1,0 +1,2 @@
+optimizer,lr,weight_decay,batch_size,epochs,final_train_loss,final_val_loss
+adamw,0.003,0.1,16,5,8.309959345278532,8.327561158400316

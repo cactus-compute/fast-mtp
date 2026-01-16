@@ -1,0 +1,2 @@
+dataset,optimizer,n_layers,lr,weight_decay,batch_size,epochs,seq_len,max_vocab_size,final_train_loss,final_val_loss
+wikitext2,adamw,4,0.003,0.1,16,10,128,4096,3.7987738132000444,3.913113328388759
