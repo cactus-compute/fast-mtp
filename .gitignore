@@ -2,9 +2,8 @@ __pycache__/
 venv/
 
 # dataset folders
-
-ptb/
-wikitext2/
+data_utils/ptb/
+data_utils/wikitext2/
 
 # personal scripts
 scripts/vm_exec.sh

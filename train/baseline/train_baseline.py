@@ -10,7 +10,7 @@ from models.text_transformer import TextTransformer
 from optimizers.adamw import build_adamw_optimizer
 from optimizers.muon import build_muon_optimizer
 
-from datasets.text_lm import load_text_datasets
+from data_utils.text_lm import load_text_datasets
 
 def _wandb_init(args):
     if not getattr(args, "wandb", False):
