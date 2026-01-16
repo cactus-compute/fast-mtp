@@ -3,4 +3,4 @@ venv/
 
 #dataset folders
 ptb/
-wikitext2/
+wikitext2/.env
