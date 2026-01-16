@@ -1,6 +1,10 @@
 __pycache__/
 venv/
 
-#dataset folders
+# dataset folders
+
 ptb/
-wikitext2/.env
+wikitext2/
+
+# personal scripts
+scripts/vm_exec.sh
