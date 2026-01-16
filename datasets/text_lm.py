@@ -13,6 +13,9 @@ def build_vocab(train_path, max_vocab_size):
     vocab = {}
     for i, tok in enumerate(specials):
         vocab[tok] = i
+    # Exclude special tokens from most_common to avoid overwriting their IDs
+    for tok in specials:
+        counter.pop(tok, None)
     for i, (tok, _) in enumerate(counter.most_common(max_vocab_size - len(specials)), start=len(specials)):
         vocab[tok] = i
     return vocab
