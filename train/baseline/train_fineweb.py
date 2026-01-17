@@ -87,7 +87,7 @@ def train_fineweb(args):
     )
 
     # Scale model size for larger sequences
-    d_ff = getattr(args, "d_ff", args.d_model * 4)
+    d_ff = args.d_ff if args.d_ff is not None else args.d_model * 4
     model = TextTransformer(
         vocab_size=vocab_size,
         d_model=args.d_model,
