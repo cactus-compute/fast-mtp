@@ -56,7 +56,25 @@ class FineWebEduDataset(IterableDataset):
         return self.tokenizer.vocab_size
 
     def __iter__(self):
-        # Load dataset in streaming mode
+        # Get worker info for DataLoader workers
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        num_workers = worker_info.num_workers if worker_info else 1
+
+        # Get distributed rank/world_size if available
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+
+        # Compute global worker ID for sharding
+        global_worker_id = rank * num_workers + worker_id
+        total_workers = world_size * num_workers
+
+        # Load dataset in streaming mode with distributed sharding
+        # This ensures each worker gets a unique, non-overlapping shard
         ds = load_dataset(
             "HuggingFaceFW/fineweb-edu",
             name=self.subset,
@@ -64,8 +82,11 @@ class FineWebEduDataset(IterableDataset):
             streaming=True,
         )
 
-        # Shuffle with buffer
-        ds = ds.shuffle(buffer_size=self.buffer_size)
+        # Use HuggingFace's distributed sharding - splits the underlying data shards
+        ds = ds.shard(num_shards=total_workers, index=global_worker_id)
+
+        # Shuffle with buffer (use different seed per worker for variety)
+        ds = ds.shuffle(buffer_size=self.buffer_size, seed=42 + global_worker_id)
 
         # Token buffer to accumulate tokens across documents
         token_buffer = []
