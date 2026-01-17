@@ -16,12 +16,24 @@ def newton_schulz_(G, steps=5, eps=1e-7):
     """
     assert G.ndim == 2
     a, b, c = (3.4445, -4.7750, 2.0315)  # Optimal coefficients for 5 iterations
-    X = G.bfloat16()
+    X = G.to(torch.bfloat16)
+
+    # If rows > cols, it's more efficient to orthogonalize the transpose
+    # and then transpose back.
+    if X.shape[0] > X.shape[1]:
+        X = X.T
+
+    # Normalize to ensure convergence
     X /= X.norm() + eps
+
     for _ in range(steps):
         A = X @ X.T
         B = b * A + c * A @ A
         X = a * X + B @ X
+
+    if G.shape[0] > G.shape[1]:
+        X = X.T
+
     return X.to(G.dtype)
 
 
@@ -83,10 +95,16 @@ def build_muon_optimizer(model, lr=0.02, weight_decay=0.01, warmup_steps=0, max_
     """
     muon_params = []
     adamw_params = []
+    seen_params = set()
 
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
+        
+        # Avoid adding the same parameter twice if it's tied (e.g. embedding and head)
+        if p in seen_params:
+            continue
+        seen_params.add(p)
 
         # Use Muon for 2D weights that aren't embeddings
         if p.ndim == 2 and "embedding" not in name:

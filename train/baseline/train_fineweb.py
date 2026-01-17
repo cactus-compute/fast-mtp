@@ -73,8 +73,15 @@ def evaluate(model, dataloader, vocab_size, accelerator):
 
 
 def train_fineweb(args):
+    # Set seed for reproducibility
+    from accelerate.utils import set_seed
+    set_seed(args.seed)
+
     accelerator = Accelerator(mixed_precision=args.mixed_precision)
     wandb = _wandb_init(args) if accelerator.is_main_process else None
+
+    # Adjust batch size per GPU
+    per_device_batch_size = args.batch_size // accelerator.num_processes
 
     # Load streaming dataset
     train_ds, val_ds, vocab_size = load_fineweb_edu(
@@ -86,9 +93,6 @@ def train_fineweb(args):
         rank=accelerator.process_index,
         world_size=accelerator.num_processes,
     )
-
-    # Adjust batch size per GPU
-    per_device_batch_size = args.batch_size // accelerator.num_processes
 
     # For IterableDataset, we don't shuffle in DataLoader
     train_loader = DataLoader(
@@ -118,9 +122,10 @@ def train_fineweb(args):
     # Each step processes batch_size * seq_len tokens across all GPUs
     tokens_per_step = args.batch_size * args.seq_len
     total_steps = args.max_tokens // tokens_per_step
-    # Multiply by num_processes since each GPU calls scheduler.step() independently
-    total_steps_for_scheduler = total_steps * accelerator.num_processes
-    warmup_steps = int(0.1 * total_steps_for_scheduler)
+    
+    # Each process runs total_steps. Warmup and total steps for scheduler 
+    # should match the local loop duration.
+    warmup_steps = int(0.1 * total_steps)
 
     if accelerator.is_main_process:
         print(f"Training for {total_steps} steps ({args.max_tokens:,} tokens)")
@@ -130,17 +135,17 @@ def train_fineweb(args):
     if args.optimizer == "adamw":
         lr = args.lr
         optimizer, scheduler = build_adamw_optimizer(
-            model, lr, args.weight_decay, warmup_steps, total_steps_for_scheduler
+            model, lr, args.weight_decay, warmup_steps, total_steps
         )
     else:
         lr = getattr(args, "muon_lr", 0.02)
         optimizer, scheduler = build_muon_optimizer(
-            model, lr, args.weight_decay, warmup_steps, total_steps_for_scheduler
+            model, lr, args.weight_decay, warmup_steps, total_steps
         )
 
     if accelerator.is_main_process:
         print(f"Optimizer: {args.optimizer}, LR: {lr}")
-        print(f"Scheduler: warmup_steps={warmup_steps}, total_steps_for_scheduler={total_steps_for_scheduler}")
+        print(f"Scheduler: warmup_steps={warmup_steps}, total_steps={total_steps}")
 
     # Prepare for distributed training
     # Note: We don't prepare dataloaders - sharding is handled at the dataset level
@@ -216,7 +221,7 @@ def train_fineweb(args):
 
             running_loss = 0.0
 
-        # Evaluation
+        # Evaluation and Checkpointing
         if step % eval_interval == 0:
             val_loss = evaluate(model, val_loader, vocab_size, accelerator)
             val_losses.append(val_loss)
@@ -225,6 +230,17 @@ def train_fineweb(args):
                 print(f"\nStep {step} | Val loss: {val_loss:.4f}")
                 if wandb is not None:
                     wandb.log({"val_loss": val_loss, "step": step}, step=step, commit=True)
+
+                # Save intermediate checkpoint if enabled
+                if args.save_checkpoints:
+                    checkpoint_path = os.path.join("runs", f"fineweb_step_{step}.pt")
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    torch.save({
+                        "step": step,
+                        "model_state_dict": unwrapped_model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_loss": val_loss,
+                    }, checkpoint_path)
 
         pbar.update(1)
 
@@ -271,34 +287,35 @@ def train_fineweb(args):
 def main():
     parser = argparse.ArgumentParser()
     # Data args
-    parser.add_argument("--max_tokens", type=int, default=100_000_000,
-                        help="Total tokens to train on (default 100M)")
+    parser.add_argument("--max_tokens", type=int, default=1_000_000_000,
+                        help="Total tokens to train on (default 1B)")
     parser.add_argument("--seq_len", type=int, default=4096,
                         help="Sequence length (default 4096)")
     parser.add_argument("--subset", type=str, default="sample-10BT",
                         help="FineWeb-Edu subset (default sample-10BT)")
     parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf",
                         help="HuggingFace tokenizer name")
-    parser.add_argument("--val_sequences", type=int, default=100,
+    parser.add_argument("--val_sequences", type=int, default=128,
                         help="Number of validation sequences to cache")
-    parser.add_argument("--num_workers", type=int, default=4,
+    parser.add_argument("--num_workers", type=int, default=8,
                         help="DataLoader workers")
+    parser.add_argument("--seed", type=int, default=42)
 
-    # Model args
-    parser.add_argument("--n_layers", type=int, default=4)
-    parser.add_argument("--d_model", type=int, default=256)
-    parser.add_argument("--n_heads", type=int, default=4)
+    # Model args - adjusted for ~50M parameter transformer
+    parser.add_argument("--n_layers", type=int, default=12)
+    parser.add_argument("--d_model", type=int, default=384)
+    parser.add_argument("--n_heads", type=int, default=12)
     parser.add_argument("--d_ff", type=int, default=None,
                         help="FFN hidden dim (default: 4*d_model)")
 
     # Training args
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "muon"])
-    parser.add_argument("--batch_size", type=int, default=8,
-                        help="Global batch size (default 8, smaller due to seq_len=4096)")
+    parser.add_argument("--optimizer", type=str, default="muon", choices=["adamw", "muon"])
+    parser.add_argument("--batch_size", type=int, default=256,
+                        help="Global batch size (default 256 for 8x A100)")
     parser.add_argument("--lr", type=float, default=3e-4,
                         help="Learning rate for AdamW (default 3e-4)")
     parser.add_argument("--muon_lr", type=float, default=0.02,
-                        help="Learning rate for Muon (default 0.02, only used with --optimizer muon)")
+                        help="Learning rate for Muon (default 0.02)")
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
 
@@ -307,6 +324,8 @@ def main():
                         help="Steps between logging")
     parser.add_argument("--eval_interval", type=int, default=500,
                         help="Steps between evaluation")
+    parser.add_argument("--save_checkpoints", action="store_true",
+                        help="Save intermediate checkpoints at each eval")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="fast-mtp")
     parser.add_argument("--wandb_run_name", type=str, default=None)
