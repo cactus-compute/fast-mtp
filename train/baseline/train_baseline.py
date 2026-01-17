@@ -176,7 +176,7 @@ def main():
     parser.add_argument("--plot_loss", action="store_true", help="Save train loss vs epoch plot as a PNG.")
     parser.add_argument("--plot_path", type=str, default=None, help="Optional output path for --plot_loss.")
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="Just Enough Learning (JEL)")
+    parser.add_argument("--wandb_project", type=str, default="fast-mtp")
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_entity", type=str, default="cactuscompute-cactus-compute")
     parser.add_argument("--wandb_mode", type=str, default="online")

@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="Just Enough Learning (JEL)")
+    parser.add_argument("--wandb_project", type=str, default="fast-mtp")
     parser.add_argument("--wandb_entity", type=str, default="cactuscompute-cactus-compute")
     parser.add_argument("--wandb_mode", type=str, default="online")
     parser.add_argument("--configs", type=str, nargs="+", default=None,
