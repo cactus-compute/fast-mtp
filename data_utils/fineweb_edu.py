@@ -69,7 +69,7 @@ def get_fineweb_dataset(
             dataset = dataset[split]
         # Vocabulary size is still needed from tokenizer
         tokenizer = get_tokenizer(tokenizer_name)
-        return dataset.with_format('torch'), tokenizer.vocab_size
+        return dataset.with_format('torch'), len(tokenizer)
 
     tokenizer = get_tokenizer(tokenizer_name)
     BOS = tokenizer.bos_token_id
@@ -138,7 +138,7 @@ def get_fineweb_dataset(
 
     chunked_dataset = chunked_dataset.with_format('torch')
 
-    return chunked_dataset, tokenizer.vocab_size
+    return chunked_dataset, len(tokenizer)
 
 
 class FineWebEduDataset(Dataset):
