@@ -30,6 +30,8 @@ class FineWebEduDataset(IterableDataset):
         tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
         max_tokens: int | None = None,
         buffer_size: int = 1000,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         self.seq_len = seq_len
         self.subset = subset
@@ -37,6 +39,8 @@ class FineWebEduDataset(IterableDataset):
         self.tokenizer_name = tokenizer_name
         self.max_tokens = max_tokens
         self.buffer_size = buffer_size
+        self.rank = rank
+        self.world_size = world_size
 
         # Load tokenizer (not in __init__ to avoid issues with multiprocessing)
         self._tokenizer = None
@@ -61,20 +65,11 @@ class FineWebEduDataset(IterableDataset):
         worker_id = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
 
-        # Get distributed rank/world_size if available
-        if torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
-            world_size = torch.distributed.get_world_size()
-        else:
-            rank = 0
-            world_size = 1
+        # Compute global worker ID for sharding across both GPUs and DataLoader workers
+        global_worker_id = self.rank * num_workers + worker_id
+        total_workers = self.world_size * num_workers
 
-        # Compute global worker ID for sharding
-        global_worker_id = rank * num_workers + worker_id
-        total_workers = world_size * num_workers
-
-        # Load dataset in streaming mode with distributed sharding
-        # This ensures each worker gets a unique, non-overlapping shard
+        # Load dataset in streaming mode
         ds = load_dataset(
             "HuggingFaceFW/fineweb-edu",
             name=self.subset,
@@ -82,7 +77,7 @@ class FineWebEduDataset(IterableDataset):
             streaming=True,
         )
 
-        # Use HuggingFace's distributed sharding - splits the underlying data shards
+        # Shard at source level - each GPU+worker combo gets different parquet files
         ds = ds.shard(num_shards=total_workers, index=global_worker_id)
 
         # Shuffle with buffer (use different seed per worker for variety)
@@ -130,12 +125,16 @@ class FineWebEduValidation(IterableDataset):
         tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
         num_sequences: int = 100,
         seed: int = 42,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         self.seq_len = seq_len
         self.subset = subset
         self.tokenizer_name = tokenizer_name
         self.num_sequences = num_sequences
         self.seed = seed
+        self.rank = rank
+        self.world_size = world_size
         self._cached_data = None
         self._tokenizer = None
 
@@ -193,10 +192,16 @@ class FineWebEduValidation(IterableDataset):
 
     def __iter__(self):
         data = self._load_data()
+        # Shard validation data across GPUs (each GPU evaluates different sequences)
+        if self.world_size > 1:
+            data = data[self.rank::self.world_size]
         for x, y in data:
             yield x, y
 
     def __len__(self):
+        if self.world_size > 1:
+            # Return per-GPU count
+            return (self.num_sequences + self.world_size - 1) // self.world_size
         return self.num_sequences
 
 
@@ -206,6 +211,8 @@ def load_fineweb_edu(
     val_sequences: int = 100,
     subset: str = "sample-10BT",
     tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
+    rank: int = 0,
+    world_size: int = 1,
 ):
     """
     Load FineWeb-Edu streaming dataset for training.
@@ -216,6 +223,8 @@ def load_fineweb_edu(
         val_sequences: Number of validation sequences to cache
         subset: HuggingFace subset (default "sample-10BT")
         tokenizer_name: Tokenizer to use (default Llama-2)
+        rank: Process rank for distributed training
+        world_size: Total number of processes for sharding
 
     Returns:
         train_ds: Streaming training dataset
@@ -227,6 +236,8 @@ def load_fineweb_edu(
         subset=subset,
         tokenizer_name=tokenizer_name,
         max_tokens=max_tokens,
+        rank=rank,
+        world_size=world_size,
     )
 
     val_ds = FineWebEduValidation(
@@ -234,6 +245,8 @@ def load_fineweb_edu(
         subset=subset,
         tokenizer_name=tokenizer_name,
         num_sequences=val_sequences,
+        rank=rank,
+        world_size=world_size,
     )
 
     vocab_size = train_ds.vocab_size

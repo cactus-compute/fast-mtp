@@ -45,17 +45,31 @@ def _wandb_init(args):
 
 def evaluate(model, dataloader, vocab_size, accelerator):
     model.eval()
-    losses = []
+    local_losses = []
     with torch.no_grad():
         for x, y in dataloader:
+            # Move to device (not using accelerator.prepare on dataloader)
+            x, y = x.to(accelerator.device), y.to(accelerator.device)
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
-            gathered_loss = accelerator.gather(loss.unsqueeze(0))
-            losses.extend(gathered_loss.cpu().tolist())
+            local_losses.append(loss)
+
+    # Gather once after loop to avoid hang from uneven batch counts
+    if local_losses:
+        local_sum = torch.stack(local_losses).sum()
+        local_count = torch.tensor(len(local_losses), device=accelerator.device)
+    else:
+        local_sum = torch.tensor(0.0, device=accelerator.device)
+        local_count = torch.tensor(0, device=accelerator.device)
+
+    # Gather sums and counts from all GPUs
+    total_sum = accelerator.gather(local_sum.unsqueeze(0)).sum()
+    total_count = accelerator.gather(local_count.unsqueeze(0)).sum()
+
     model.train()
-    if len(losses) == 0:
+    if total_count == 0:
         return 0.0
-    return sum(losses) / len(losses)
+    return (total_sum / total_count).item()
 
 
 def train_fineweb(args):
@@ -69,6 +83,8 @@ def train_fineweb(args):
         val_sequences=args.val_sequences,
         subset=args.subset,
         tokenizer_name=args.tokenizer,
+        rank=accelerator.process_index,
+        world_size=accelerator.num_processes,
     )
 
     # Adjust batch size per GPU
@@ -127,9 +143,9 @@ def train_fineweb(args):
         print(f"Scheduler: warmup_steps={warmup_steps}, total_steps_for_scheduler={total_steps_for_scheduler}")
 
     # Prepare for distributed training
-    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, val_loader, scheduler
-    )
+    # Note: We don't prepare dataloaders - sharding is handled at the dataset level
+    # via ds.shard() for efficiency (each GPU reads only its parquet files)
+    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
 
     if accelerator.is_main_process:
         os.makedirs("runs", exist_ok=True)
@@ -148,6 +164,8 @@ def train_fineweb(args):
     pbar = tqdm(total=total_steps, disable=not accelerator.is_main_process, desc="Training")
 
     for x, y in train_loader:
+        # Move to device (not using accelerator.prepare on dataloader)
+        x, y = x.to(accelerator.device), y.to(accelerator.device)
         logits = model(x)
         loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
 
