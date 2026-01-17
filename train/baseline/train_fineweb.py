@@ -184,7 +184,7 @@ def train_fineweb(args):
             if accelerator.is_main_process:
                 print(f"\nStep {step} | Val loss: {val_loss:.4f}")
                 if wandb is not None:
-                    wandb.log({"val_loss": val_loss}, step=step)
+                    wandb.log({"val_loss": val_loss, "step": step}, step=step, commit=True)
 
         pbar.update(1)
 
@@ -199,6 +199,8 @@ def train_fineweb(args):
 
     if accelerator.is_main_process:
         print(f"\nTraining complete. Final val loss: {final_val_loss:.4f}")
+        if wandb is not None:
+            wandb.finish()
 
     # Save model
     accelerator.wait_for_everyone()
