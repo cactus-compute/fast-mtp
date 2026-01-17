@@ -139,7 +139,7 @@ def train_fineweb(args, accelerator=None):
     
     # Each process runs total_steps. Warmup and total steps for scheduler 
     # should match the local loop duration.
-    warmup_steps = int(0.1 * total_steps)
+    warmup_steps = min(int(0.1 * total_steps), 500)
 
     if accelerator.is_main_process:
         print(f"Training for {total_steps} steps ({args.max_tokens:,} tokens)")
@@ -312,8 +312,8 @@ def main():
     # Data args
     parser.add_argument("--max_tokens", type=int, default=1_000_000_000,
                         help="Total tokens to train on (default 1B)")
-    parser.add_argument("--seq_len", type=int, default=4096,
-                        help="Sequence length (default 4096)")
+    parser.add_argument("--seq_len", type=int, default=1024,
+                        help="Sequence length (default 1024)")
     parser.add_argument("--subset", type=str, default="sample-10BT",
                         help="FineWeb-Edu subset (default sample-10BT)")
     parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf",
