@@ -98,9 +98,12 @@ def train_fineweb(args):
     )
 
     # Calculate total steps from token budget
+    # Each step processes batch_size * seq_len tokens across all GPUs
     tokens_per_step = args.batch_size * args.seq_len
     total_steps = args.max_tokens // tokens_per_step
-    warmup_steps = int(0.1 * total_steps)
+    # Multiply by num_processes since each GPU calls scheduler.step() independently
+    total_steps_for_scheduler = total_steps * accelerator.num_processes
+    warmup_steps = int(0.1 * total_steps_for_scheduler)
 
     if accelerator.is_main_process:
         print(f"Training for {total_steps} steps ({args.max_tokens:,} tokens)")
@@ -110,16 +113,17 @@ def train_fineweb(args):
     if args.optimizer == "adamw":
         lr = args.lr
         optimizer, scheduler = build_adamw_optimizer(
-            model, lr, args.weight_decay, warmup_steps, total_steps
+            model, lr, args.weight_decay, warmup_steps, total_steps_for_scheduler
         )
     else:
         lr = getattr(args, "muon_lr", 0.02)
         optimizer, scheduler = build_muon_optimizer(
-            model, lr, args.weight_decay, warmup_steps, total_steps
+            model, lr, args.weight_decay, warmup_steps, total_steps_for_scheduler
         )
 
     if accelerator.is_main_process:
         print(f"Optimizer: {args.optimizer}, LR: {lr}")
+        print(f"Scheduler: warmup_steps={warmup_steps}, total_steps_for_scheduler={total_steps_for_scheduler}")
 
     # Prepare for distributed training
     model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
@@ -161,12 +165,15 @@ def train_fineweb(args):
             train_losses.append(avg_loss)
 
             if accelerator.is_main_process:
+                current_lr = scheduler.get_last_lr()[0]
                 pbar.set_postfix({"loss": f"{avg_loss:.4f}", "tokens": f"{tokens_seen:,}"})
+                if args.debug_lr:
+                    print(f"\n[LR Debug] Step {step}/{total_steps}, LR: {current_lr:.6e}")
                 if wandb is not None:
                     wandb.log({
                         "train_loss": avg_loss,
                         "tokens_seen": tokens_seen,
-                        "lr": scheduler.get_last_lr()[0],
+                        "lr": current_lr,
                     }, step=step)
 
             running_loss = 0.0
@@ -260,6 +267,8 @@ def main():
                         help="Steps between logging")
     parser.add_argument("--eval_interval", type=int, default=500,
                         help="Steps between evaluation")
+    parser.add_argument("--debug_lr", action="store_true",
+                        help="Print LR at each log interval for debugging")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="fast-mtp")
     parser.add_argument("--wandb_run_name", type=str, default=None)
