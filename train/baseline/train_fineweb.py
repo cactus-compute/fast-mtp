@@ -45,32 +45,22 @@ def _wandb_init(args):
 
 
 def evaluate(model, dataloader, vocab_size, accelerator):
-    """Evaluate model on the full validation set."""
+    """Evaluate model on the full validation set (each GPU evaluates full set)."""
     model.eval()
-    local_losses = []
+    total_loss = 0.0
+    num_batches = 0
     with torch.no_grad():
         for x, y in dataloader:
             x, y = x.to(accelerator.device), y.to(accelerator.device)
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
-            local_losses.append(loss)
-
-    # Gather once after loop
-    if local_losses:
-        local_sum = torch.stack(local_losses).sum()
-        local_count = torch.tensor(len(local_losses), device=accelerator.device)
-    else:
-        local_sum = torch.tensor(0.0, device=accelerator.device)
-        local_count = torch.tensor(0, device=accelerator.device)
-
-    # Gather sums and counts from all GPUs
-    total_sum = accelerator.gather(local_sum.unsqueeze(0)).sum()
-    total_count = accelerator.gather(local_count.unsqueeze(0)).sum()
+            total_loss += loss.item()
+            num_batches += 1
 
     model.train()
-    if total_count == 0:
+    if num_batches == 0:
         return 0.0
-    return (total_sum / total_count).item()
+    return total_loss / num_batches
 
 
 def train_fineweb(args, accelerator=None):

@@ -241,13 +241,11 @@ def load_fineweb_edu(
     train_hf_dataset = train_hf_dataset.select(range(val_start))
     train_dataset = FineWebEduDataset(train_hf_dataset)
 
-    # Create samplers for distributed training
+    # Create sampler for distributed training (only for train, not val)
     if distributed:
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
-        val_sampler = DistributedSampler(val_dataset, shuffle=False)
     else:
         train_sampler = None
-        val_sampler = None
 
     # Create dataloaders
     train_loader = DataLoader(
@@ -261,14 +259,15 @@ def load_fineweb_edu(
         persistent_workers=(num_workers > 0),
     )
 
+    # Validation: no distributed sampler - each GPU evaluates full val set
+    # This is simpler and validation is cheap
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        sampler=val_sampler,
-        num_workers=0,  # Validation is small, no need for workers
+        num_workers=0,
         pin_memory=True,
         shuffle=False,
-        drop_last=True,
+        drop_last=False,  # Keep all samples for accurate val loss
     )
 
     # Wrap train loader in infinite iterator (validation is finite)
