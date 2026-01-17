@@ -1,3 +1,10 @@
+import warnings
+warnings.warn(
+    "sweep_baseline_light.py is deprecated. Use sweep_fineweb_arch.py instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 import os
 import csv
 import itertools

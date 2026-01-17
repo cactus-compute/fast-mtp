@@ -1,3 +1,10 @@
+import warnings
+warnings.warn(
+    "train_baseline.py is deprecated. Use train_fineweb.py instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 import argparse
 import os
 import sys
