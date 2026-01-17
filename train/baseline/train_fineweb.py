@@ -6,10 +6,11 @@ import argparse
 import math
 import os
 import csv
+from datetime import timedelta
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from accelerate import Accelerator
+from accelerate import Accelerator, InitProcessGroupKwargs
 from tqdm import tqdm
 
 from models.text_transformer import TextTransformer
@@ -78,7 +79,12 @@ def train_fineweb(args, accelerator=None):
     set_seed(args.seed)
 
     if accelerator is None:
-        accelerator = Accelerator(mixed_precision=args.mixed_precision)
+        # Increase timeout to 30 minutes to handle transient network issues when streaming data
+        kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=900))
+        accelerator = Accelerator(
+            mixed_precision=args.mixed_precision,
+            kwargs_handlers=[kwargs]
+        )
     
     wandb = _wandb_init(args) if accelerator.is_main_process else None
 
