@@ -167,8 +167,6 @@ def train_fineweb(args):
             if accelerator.is_main_process:
                 current_lr = scheduler.get_last_lr()[0]
                 pbar.set_postfix({"loss": f"{avg_loss:.4f}", "tokens": f"{tokens_seen:,}"})
-                if args.debug_lr:
-                    print(f"\n[LR Debug] Step {step}/{total_steps}, LR: {current_lr:.6e}")
                 if wandb is not None:
                     wandb.log({
                         "train_loss": avg_loss,
@@ -267,8 +265,6 @@ def main():
                         help="Steps between logging")
     parser.add_argument("--eval_interval", type=int, default=500,
                         help="Steps between evaluation")
-    parser.add_argument("--debug_lr", action="store_true",
-                        help="Print LR at each log interval for debugging")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="fast-mtp")
     parser.add_argument("--wandb_run_name", type=str, default=None)
