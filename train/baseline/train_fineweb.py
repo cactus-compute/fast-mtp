@@ -310,12 +310,12 @@ def main():
                         help="DataLoader workers")
     parser.add_argument("--seed", type=int, default=42)
 
-    # Model args - adjusted for ~50M parameter transformer
-    parser.add_argument("--n_layers", type=int, default=12)
-    parser.add_argument("--d_model", type=int, default=384)
-    parser.add_argument("--n_heads", type=int, default=12)
-    parser.add_argument("--d_ff", type=int, default=None,
-                        help="FFN hidden dim (default: 4*d_model)")
+    # Model args - Balanced config (~50M params, good for ablations)
+    parser.add_argument("--n_layers", type=int, default=8)
+    parser.add_argument("--d_model", type=int, default=448)
+    parser.add_argument("--n_heads", type=int, default=7)
+    parser.add_argument("--d_ff", type=int, default=1152,
+                        help="FFN hidden dim (default: 1152 for balanced config)")
 
     # Training args
     parser.add_argument("--optimizer", type=str, default="muon", choices=["adamw", "muon"])
