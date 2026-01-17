@@ -44,13 +44,12 @@ def _wandb_init(args):
     return wandb
 
 
-def evaluate(model, dataloader, vocab_size, accelerator, num_batches: int = 32):
-    """Evaluate model on a fixed number of batches from the infinite iterator."""
+def evaluate(model, dataloader, vocab_size, accelerator):
+    """Evaluate model on the full validation set."""
     model.eval()
     local_losses = []
     with torch.no_grad():
-        for _ in range(num_batches):
-            x, y = next(dataloader)
+        for x, y in dataloader:
             x, y = x.to(accelerator.device), y.to(accelerator.device)
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))

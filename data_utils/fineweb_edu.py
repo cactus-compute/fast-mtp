@@ -271,8 +271,7 @@ def load_fineweb_edu(
         drop_last=True,
     )
 
-    # Wrap in infinite iterators
+    # Wrap train loader in infinite iterator (validation is finite)
     train_loader = cycle_loader(train_loader, train_sampler)
-    val_loader = cycle_loader(val_loader, val_sampler)
 
     return train_loader, val_loader, vocab_size, train_sampler
