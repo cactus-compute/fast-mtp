@@ -82,8 +82,9 @@ class Muon(Optimizer):
                 # Apply Newton-Schulz orthogonalization
                 g = newton_schulz_(g, steps=ns_steps)
 
-                # Scale by sqrt(max(m, n)) to preserve update magnitude
-                scale = max(g.shape[0], g.shape[1]) ** 0.5
+                # Scale by sqrt(ratio) to preserve update magnitude for rectangular matrices
+                # This matches current Modded-NanoGPT practice
+                scale = max(1, p.shape[0] / p.shape[1]) ** 0.5
                 p.add_(g, alpha=-lr * scale)
 
 

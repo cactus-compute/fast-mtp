@@ -115,6 +115,20 @@ class TextTransformer(nn.Module):
         self.register_buffer('rope_cos', cos)
         self.register_buffer('rope_sin', sin)
 
+        # Initialize weights
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            # Special scaling for output projection and FFN-2
+            std = 0.02
+            # Note: For deeper models, we could scale by 1/sqrt(2*n_layers)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
     def forward(self, x):
         b, t = x.shape
         h = self.token_embedding(x)
