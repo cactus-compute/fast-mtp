@@ -288,6 +288,11 @@ def train_fineweb(args):
                 final_train_loss, final_val_loss
             ])
 
+    # Clean up distributed process group to avoid GIL errors on exit
+    accelerator.wait_for_everyone()
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
     return final_train_loss, final_val_loss
 
 
