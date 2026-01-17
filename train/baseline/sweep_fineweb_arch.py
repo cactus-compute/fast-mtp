@@ -11,6 +11,7 @@ import os
 import csv
 import argparse
 from types import SimpleNamespace
+import torch
 from train.baseline.train_fineweb import train_fineweb
 
 
@@ -167,6 +168,10 @@ def main():
     print(f"Best config: {best_config} with val_loss={best_val_loss:.4f}")
     print(f"Results saved to: {results_path}")
     print(f"{'='*60}")
+
+    # Clean up distributed process group to avoid GIL errors on exit
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
