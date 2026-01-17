@@ -118,26 +118,46 @@ def build_muon_optimizer(model, lr=0.02, weight_decay=0.01, warmup_steps=0, max_
     return combined_opt, scheduler
 
 
-class CombinedOptimizer:
-    """Wraps multiple optimizers to provide a unified interface."""
+class CombinedOptimizer(Optimizer):
+    """Wraps multiple optimizers to provide a unified interface compatible with accelerate."""
 
     def __init__(self, optimizers):
+        # Collect all params for the base Optimizer init
+        all_params = []
+        for opt in optimizers:
+            for group in opt.param_groups:
+                all_params.extend(group["params"])
+
+        # Initialize base Optimizer with dummy defaults
+        super().__init__(all_params, defaults={})
+
+        # Store the actual optimizers
         self.optimizers = optimizers
+
+        # Replace param_groups with the combined groups from all optimizers
         self.param_groups = []
         for opt in optimizers:
             self.param_groups.extend(opt.param_groups)
 
-    def zero_grad(self):
+    def zero_grad(self, set_to_none=True):
         for opt in self.optimizers:
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=set_to_none)
 
-    def step(self):
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
         for opt in self.optimizers:
             opt.step()
+        return loss
 
     def state_dict(self):
-        return [opt.state_dict() for opt in self.optimizers]
+        return {
+            "optimizers": [opt.state_dict() for opt in self.optimizers]
+        }
 
-    def load_state_dict(self, state_dicts):
-        for opt, sd in zip(self.optimizers, state_dicts):
+    def load_state_dict(self, state_dict):
+        for opt, sd in zip(self.optimizers, state_dict["optimizers"]):
             opt.load_state_dict(sd)
