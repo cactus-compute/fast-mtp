@@ -83,6 +83,12 @@ def train_fineweb(args):
     # Adjust batch size per GPU
     per_device_batch_size = args.batch_size // accelerator.num_processes
 
+    # Warn about num_workers with distributed training
+    if args.num_workers > 0 and accelerator.is_main_process:
+        print(f"Warning: num_workers={args.num_workers} with {accelerator.num_processes} GPUs may cause "
+              f"sharding errors if total workers ({args.num_workers * accelerator.num_processes}) exceeds "
+              f"dataset shards. Use --num_workers 0 if you encounter IndexError.")
+
     # Load streaming dataset
     train_ds, val_ds, vocab_size = load_fineweb_edu(
         seq_len=args.seq_len,
