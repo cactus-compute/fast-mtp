@@ -156,7 +156,8 @@ def train_fineweb(args):
     # Prepare for distributed training
     # Note: We don't prepare dataloaders - sharding is handled at the dataset level
     # via ds.shard() for efficiency (each GPU reads only its parquet files)
-    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    # Note: Don't prepare scheduler - we step it manually and Accelerate would double-step it
+    model, optimizer = accelerator.prepare(model, optimizer)
 
     if accelerator.is_main_process:
         os.makedirs("runs", exist_ok=True)
