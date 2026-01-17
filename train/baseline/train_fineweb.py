@@ -3,6 +3,7 @@ Training script for FineWeb-Edu with streaming data and token-based training.
 """
 
 import argparse
+import math
 import os
 import csv
 import torch
@@ -142,6 +143,7 @@ def train_fineweb(args):
 
     train_losses = []
     val_losses = []
+    recent_losses = []  # Rolling window for loss variance
 
     pbar = tqdm(total=total_steps, disable=not accelerator.is_main_process, desc="Training")
 
@@ -151,7 +153,7 @@ def train_fineweb(args):
 
         optimizer.zero_grad()
         accelerator.backward(loss)
-        accelerator.clip_grad_norm_(model.parameters(), 1.0)
+        grad_norm = accelerator.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
 
@@ -164,14 +166,34 @@ def train_fineweb(args):
             avg_loss = running_loss / log_interval
             train_losses.append(avg_loss)
 
+            # Track recent losses for variance (rolling window of 100)
+            recent_losses.append(avg_loss)
+            if len(recent_losses) > 100:
+                recent_losses.pop(0)
+
             if accelerator.is_main_process:
                 current_lr = scheduler.get_last_lr()[0]
                 pbar.set_postfix({"loss": f"{avg_loss:.4f}", "tokens": f"{tokens_seen:,}"})
                 if wandb is not None:
+                    # Compute weight norm
+                    weight_norm = math.sqrt(sum(
+                        p.data.norm().item() ** 2 for p in model.parameters()
+                    ))
+
+                    # Compute loss variance from rolling window
+                    if len(recent_losses) > 1:
+                        mean_loss = sum(recent_losses) / len(recent_losses)
+                        loss_variance = sum((x - mean_loss) ** 2 for x in recent_losses) / len(recent_losses)
+                    else:
+                        loss_variance = 0.0
+
                     wandb.log({
                         "train_loss": avg_loss,
                         "tokens_seen": tokens_seen,
                         "lr": current_lr,
+                        "grad_norm": grad_norm.item(),  # type: ignore[union-attr]
+                        "weight_norm": weight_norm,
+                        "loss_variance": loss_variance,
                     }, step=step)
 
             running_loss = 0.0
