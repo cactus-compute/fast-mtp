@@ -34,6 +34,9 @@ def apply_rope(q, k, cos, sin):
     Reference: HuggingFace Transformers Llama implementation
     https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
     """
+    # cos/sin are (1, 1, seq_len, d_head/2), need to repeat for full d_head
+    cos = torch.cat([cos, cos], dim=-1)
+    sin = torch.cat([sin, sin], dim=-1)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
