@@ -262,6 +262,11 @@ def train_fineweb(args, accelerator=None):
     final_val_loss = evaluate(model, val_loader, vocab_size, accelerator)
     final_train_loss = train_losses[-1] if train_losses else 0.0
 
+    # Explicitly clear the train_loader to shut down workers before finalization
+    # This helps prevent GIL errors (PyGILState_Release) during process exit
+    del train_loader
+    del val_loader
+
     if accelerator.is_main_process:
         print(f"\nTraining complete. Final val loss: {final_val_loss:.4f}")
         if wandb is not None:
@@ -289,6 +294,9 @@ def train_fineweb(args, accelerator=None):
                 args.lr, args.weight_decay, args.batch_size, args.seq_len,
                 final_train_loss, final_val_loss
             ])
+
+    # Final wait to ensure all processes stay alive until the main process finishes saving
+    accelerator.wait_for_everyone()
 
     return final_train_loss, final_val_loss
 
