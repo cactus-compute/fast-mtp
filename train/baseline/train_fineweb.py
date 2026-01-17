@@ -87,12 +87,13 @@ def train_fineweb(args):
     )
 
     # Scale model size for larger sequences
+    d_ff = getattr(args, "d_ff", args.d_model * 4)
     model = TextTransformer(
         vocab_size=vocab_size,
         d_model=args.d_model,
         n_heads=args.n_heads,
         n_layers=args.n_layers,
-        d_ff=args.d_model * 4,
+        d_ff=d_ff,
         max_seq_len=args.seq_len,
     )
 
@@ -235,6 +236,8 @@ def main():
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=4)
+    parser.add_argument("--d_ff", type=int, default=None,
+                        help="FFN hidden dim (default: 4*d_model)")
 
     # Training args
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "muon"])
