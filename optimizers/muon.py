@@ -6,7 +6,7 @@ Reference: https://github.com/KellerJordan/modded-nanogpt
 
 import torch
 from torch.optim import Optimizer
-from optimizers.adamw import WarmupCosineScheduler
+from optimizers.scheduler import WarmupCosineScheduler
 
 
 def newton_schulz_(G, steps=5, eps=1e-7):
