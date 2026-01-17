@@ -303,7 +303,7 @@ def main():
                         help="HuggingFace tokenizer name")
     parser.add_argument("--val_sequences", type=int, default=128,
                         help="Number of validation sequences to cache")
-    parser.add_argument("--num_workers", type=int, default=8,
+    parser.add_argument("--num_workers", type=int, default=0,
                         help="DataLoader workers")
     parser.add_argument("--seed", type=int, default=42)
 

@@ -55,7 +55,7 @@ def main():
                         help="FineWeb-Edu subset")
     parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--val_sequences", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--wandb", action="store_true")
