@@ -108,13 +108,18 @@ def train_fineweb(args):
         print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
 
     if args.optimizer == "adamw":
+        lr = args.lr
         optimizer, scheduler = build_adamw_optimizer(
-            model, args.lr, args.weight_decay, warmup_steps, total_steps
+            model, lr, args.weight_decay, warmup_steps, total_steps
         )
     else:
+        lr = getattr(args, "muon_lr", 0.02)
         optimizer, scheduler = build_muon_optimizer(
-            model, args.lr, args.weight_decay, warmup_steps, total_steps
+            model, lr, args.weight_decay, warmup_steps, total_steps
         )
+
+    if accelerator.is_main_process:
+        print(f"Optimizer: {args.optimizer}, LR: {lr}")
 
     # Prepare for distributed training
     model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
@@ -243,7 +248,10 @@ def main():
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "muon"])
     parser.add_argument("--batch_size", type=int, default=8,
                         help="Global batch size (default 8, smaller due to seq_len=4096)")
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=3e-4,
+                        help="Learning rate for AdamW (default 3e-4)")
+    parser.add_argument("--muon_lr", type=float, default=0.02,
+                        help="Learning rate for Muon (default 0.02, only used with --optimizer muon)")
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
 

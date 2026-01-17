@@ -45,7 +45,9 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64,
                         help="Global batch size")
     parser.add_argument("--lr", type=float, default=3e-4,
-                        help="Learning rate")
+                        help="Learning rate for AdamW (default 3e-4)")
+    parser.add_argument("--muon_lr", type=float, default=0.02,
+                        help="Learning rate for Muon (default 0.02)")
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "muon"])
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
@@ -95,6 +97,9 @@ def main():
                   f"n_layers={arch['n_layers']}, d_ff={arch['d_ff']}")
             print(f"{'='*60}\n")
 
+            # Select appropriate LR based on optimizer
+            effective_lr = args_cli.muon_lr if args_cli.optimizer == "muon" else args_cli.lr
+
             args = SimpleNamespace(
                 max_tokens=args_cli.max_tokens,
                 seq_len=args_cli.seq_len,
@@ -109,13 +114,14 @@ def main():
                 optimizer=args_cli.optimizer,
                 batch_size=args_cli.batch_size,
                 lr=args_cli.lr,
+                muon_lr=args_cli.muon_lr,
                 weight_decay=args_cli.weight_decay,
                 mixed_precision=args_cli.mixed_precision,
                 log_interval=args_cli.log_interval,
                 eval_interval=args_cli.eval_interval,
                 wandb=args_cli.wandb,
                 wandb_project=args_cli.wandb_project,
-                wandb_run_name=f"arch_{config_name}_{args_cli.max_tokens // 1_000_000}M",
+                wandb_run_name=f"arch_{config_name}_{args_cli.optimizer}_{args_cli.max_tokens // 1_000_000}M",
                 wandb_entity=args_cli.wandb_entity,
                 wandb_mode=args_cli.wandb_mode,
             )
@@ -139,7 +145,7 @@ def main():
                 args_cli.max_tokens,
                 args_cli.seq_len,
                 args_cli.batch_size,
-                args_cli.lr,
+                effective_lr,
                 args_cli.optimizer,
                 final_train_loss,
                 final_val_loss,
