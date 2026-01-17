@@ -92,9 +92,10 @@ class FineWebEduDataset(IterableDataset):
             if not text or not text.strip():
                 continue
 
-            # Tokenize the document
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+            # Tokenize with BOS, then manually add EOS at document end
+            tokens = self.tokenizer.encode(text, add_special_tokens=True)
             token_buffer.extend(tokens)
+            token_buffer.append(self.tokenizer.eos_token_id)
 
             # Yield complete sequences from buffer
             while len(token_buffer) >= self.seq_len + 1:
@@ -175,8 +176,10 @@ class FineWebEduValidation(IterableDataset):
             if not text or not text.strip():
                 continue
 
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+            # Tokenize with BOS, then manually add EOS at document end
+            tokens = self.tokenizer.encode(text, add_special_tokens=True)
             token_buffer.extend(tokens)
+            token_buffer.append(self.tokenizer.eos_token_id)
 
             while len(token_buffer) >= self.seq_len + 1 and len(sequences) < self.num_sequences:
                 x = torch.tensor(token_buffer[:self.seq_len], dtype=torch.long)
