@@ -1,257 +1,278 @@
 """
-Streaming dataset for FineWeb-Edu using Llama tokenizer.
-Yields (x, y) pairs of seq_len tokens for language modeling.
+Map-style dataset for FineWeb-Edu using Llama tokenizer.
+Fully loads and preprocesses the dataset for proper distributed training with DistributedSampler.
 """
 
-import torch
-from torch.utils.data import IterableDataset
-from datasets import load_dataset
+import os
+import itertools
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer
 
 
-class FineWebEduDataset(IterableDataset):
+def get_tokenizer(tokenizer_name: str = "meta-llama/Llama-2-7b-hf"):
+    """Load tokenizer and ensure it has required special tokens."""
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name,
+        use_fast=True,
+        trust_remote_code=True,
+    )
+
+    if tokenizer.bos_token is None:
+        if tokenizer.cls_token is None:
+            raise AttributeError(f'Tokenizer must have a bos_token or cls_token: {tokenizer}')
+        tokenizer.bos_token = tokenizer.cls_token
+    if tokenizer.eos_token is None:
+        if tokenizer.sep_token is None:
+            raise AttributeError(f'Tokenizer must have a eos_token or sep_token: {tokenizer}')
+        tokenizer.eos_token = tokenizer.sep_token
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+
+    return tokenizer
+
+
+def get_fineweb_dataset(
+    seq_len: int = 1024,
+    subset: str = "sample-10BT",
+    split: str = "train",
+    tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
+    max_samples: int | None = None,
+    num_proc: int = 8,
+    cache_dir: str | None = None,
+    data_path: str = "HuggingFaceFW/fineweb-edu",
+    load_preprocessed: bool = False,
+):
     """
-    Streams FineWeb-Edu and yields (input, target) pairs for language modeling.
+    Load and preprocess FineWeb-Edu dataset into fixed-length chunks.
 
     Args:
-        seq_len: Sequence length for each sample (default 4096)
+        seq_len: Sequence length for each sample
         subset: HuggingFace subset name (default "sample-10BT" for 10B token sample)
         split: Dataset split (default "train")
-        tokenizer_name: HuggingFace tokenizer to use (default "meta-llama/Llama-2-7b-hf")
-        max_tokens: Maximum total tokens to yield (None for infinite)
-        buffer_size: Number of documents to buffer for shuffling (default 1000)
+        tokenizer_name: HuggingFace tokenizer to use
+        max_samples: Maximum number of raw samples to load (None for all)
+        num_proc: Number of processes for preprocessing
+        cache_dir: Cache directory for dataset
+        data_path: Path to dataset (HF repo or local directory)
+        load_preprocessed: Whether to load preprocessed data from disk (data_path)
+
+    Returns:
+        Dataset with 'input_ids' ready for language modeling
     """
+    if load_preprocessed:
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"Preprocessed dataset not found at {data_path}")
+        dataset = load_from_disk(data_path)
+        # If it's a DatasetDict, pick the split
+        if hasattr(dataset, "keys") and split in dataset:
+            dataset = dataset[split]
+        # Vocabulary size is still needed from tokenizer
+        tokenizer = get_tokenizer(tokenizer_name)
+        return dataset.with_format('torch'), tokenizer.vocab_size
 
-    def __init__(
-        self,
-        seq_len: int = 4096,
-        subset: str = "sample-10BT",
-        split: str = "train",
-        tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
-        max_tokens: int | None = None,
-        buffer_size: int = 1000,
-        rank: int = 0,
-        world_size: int = 1,
-    ):
-        self.seq_len = seq_len
-        self.subset = subset
-        self.split = split
-        self.tokenizer_name = tokenizer_name
-        self.max_tokens = max_tokens
-        self.buffer_size = buffer_size
-        self.rank = rank
-        self.world_size = world_size
+    tokenizer = get_tokenizer(tokenizer_name)
+    BOS = tokenizer.bos_token_id
+    EOS = tokenizer.eos_token_id
 
-        # Load tokenizer (not in __init__ to avoid issues with multiprocessing)
-        self._tokenizer = None
+    # Load dataset (non-streaming for proper distributed training)
+    if max_samples is not None:
+        split_str = f"{split}[:{max_samples}]"
+    else:
+        split_str = split
 
-    @property
-    def tokenizer(self):
-        if self._tokenizer is None:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.tokenizer_name,
-                use_fast=True,
-                trust_remote_code=True,
-            )
-        return self._tokenizer
+    dataset = load_dataset(
+        data_path,
+        name=subset,
+        split=split_str,
+        cache_dir=cache_dir,
+        trust_remote_code=True,
+    )
 
-    @property
-    def vocab_size(self):
-        return self.tokenizer.vocab_size
-
-    def __iter__(self):
-        # Get worker info for DataLoader workers
-        worker_info = torch.utils.data.get_worker_info()
-        worker_id = worker_info.id if worker_info else 0
-        num_workers = worker_info.num_workers if worker_info else 1
-
-        # Compute global worker ID for sharding across both GPUs and DataLoader workers
-        global_worker_id = self.rank * num_workers + worker_id
-        total_workers = self.world_size * num_workers
-
-        # Load dataset in streaming mode
-        ds = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name=self.subset,
-            split=self.split,
-            streaming=True,
+    def preprocess_and_tokenize(examples):
+        """Tokenize text without special tokens (we add them during chunking)."""
+        texts = examples["text"]
+        tokens = tokenizer(
+            texts,
+            add_special_tokens=False,
+            return_attention_mask=False,
+            return_token_type_ids=False,
         )
+        # Add EOS at end of each document
+        tokens = {'input_ids': [t + [EOS] for t in tokens['input_ids']]}
+        return tokens
 
-        # Shard at source level - each GPU+worker combo gets different parquet files
-        ds = ds.shard(num_shards=total_workers, index=global_worker_id)
+    tokenized_dataset = dataset.map(
+        preprocess_and_tokenize,
+        batched=True,
+        num_proc=num_proc,
+        remove_columns=dataset.column_names,
+        load_from_cache_file=True,
+        desc="Tokenizing",
+    )
 
-        # Shuffle with buffer (use different seed per worker for variety)
-        ds = ds.shuffle(buffer_size=self.buffer_size, seed=42 + global_worker_id)
+    def group_texts(examples):
+        """Concatenate all texts and split into fixed-length chunks with BOS/EOS."""
+        concatenated = list(itertools.chain(*examples['input_ids']))
+        total_length = len(concatenated)
 
-        # Token buffer to accumulate tokens across documents
-        token_buffer = []
-        tokens_yielded = 0
+        # Reserve space for BOS at start of each chunk
+        # (EOS tokens are already in the stream from document boundaries)
+        chunk_content_size = seq_len - 1  # -1 for BOS
+        total_length = (total_length // chunk_content_size) * chunk_content_size
 
-        for example in ds:
-            text = example.get("text", "")
-            if not text or not text.strip():
-                continue
+        result = {'input_ids': []}
+        for i in range(0, total_length, chunk_content_size):
+            chunk = [BOS] + concatenated[i:i + chunk_content_size]
+            result['input_ids'].append(chunk)
 
-            # Tokenize with BOS, then manually add EOS at document end
-            tokens = self.tokenizer.encode(text, add_special_tokens=True)
-            token_buffer.extend(tokens)
-            token_buffer.append(self.tokenizer.eos_token_id)
+        return result
 
-            # Yield complete sequences from buffer
-            while len(token_buffer) >= self.seq_len + 1:
-                # x is input, y is target (shifted by 1)
-                x = torch.tensor(token_buffer[:self.seq_len], dtype=torch.long)
-                y = torch.tensor(token_buffer[1:self.seq_len + 1], dtype=torch.long)
+    chunked_dataset = tokenized_dataset.map(
+        group_texts,
+        batched=True,
+        num_proc=num_proc,
+        load_from_cache_file=True,
+        desc="Chunking",
+    )
 
-                # Remove used tokens (keep 1 for overlap)
-                token_buffer = token_buffer[self.seq_len:]
+    chunked_dataset = chunked_dataset.with_format('torch')
 
-                yield x, y
-
-                tokens_yielded += self.seq_len
-                if self.max_tokens is not None and tokens_yielded >= self.max_tokens:
-                    return
+    return chunked_dataset, tokenizer.vocab_size
 
 
-class FineWebEduValidation(IterableDataset):
+class FineWebEduDataset(Dataset):
     """
-    Creates a fixed validation set by taking the first N tokens from the stream.
-    This ensures consistent validation across training runs.
+    Map-style dataset wrapper for FineWeb-Edu.
+    Returns (input, target) pairs for language modeling.
     """
 
-    def __init__(
-        self,
-        seq_len: int = 4096,
-        subset: str = "sample-10BT",
-        tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
-        num_sequences: int = 100,
-        seed: int = 42,
-        rank: int = 0,
-        world_size: int = 1,
-    ):
-        self.seq_len = seq_len
-        self.subset = subset
-        self.tokenizer_name = tokenizer_name
-        self.num_sequences = num_sequences
-        self.seed = seed
-        self.rank = rank
-        self.world_size = world_size
-        self._cached_data = None
-        self._tokenizer = None
-
-    @property
-    def tokenizer(self):
-        if self._tokenizer is None:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.tokenizer_name,
-                use_fast=True,
-                trust_remote_code=True,
-            )
-        return self._tokenizer
-
-    @property
-    def vocab_size(self):
-        return self.tokenizer.vocab_size
-
-    def _load_data(self):
-        """Load and cache validation data."""
-        if self._cached_data is not None:
-            return self._cached_data
-
-        ds = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name=self.subset,
-            split="train",  # FineWeb-Edu only has train split
-            streaming=True,
-        )
-
-        # Use a fixed seed for reproducible validation set
-        ds = ds.shuffle(seed=self.seed, buffer_size=1000)
-
-        token_buffer = []
-        sequences = []
-
-        for example in ds:
-            text = example.get("text", "")
-            if not text or not text.strip():
-                continue
-
-            # Tokenize with BOS, then manually add EOS at document end
-            tokens = self.tokenizer.encode(text, add_special_tokens=True)
-            token_buffer.extend(tokens)
-            token_buffer.append(self.tokenizer.eos_token_id)
-
-            while len(token_buffer) >= self.seq_len + 1 and len(sequences) < self.num_sequences:
-                x = torch.tensor(token_buffer[:self.seq_len], dtype=torch.long)
-                y = torch.tensor(token_buffer[1:self.seq_len + 1], dtype=torch.long)
-                token_buffer = token_buffer[self.seq_len:]
-                sequences.append((x, y))
-
-            if len(sequences) >= self.num_sequences:
-                break
-
-        self._cached_data = sequences
-        return self._cached_data
-
-    def __iter__(self):
-        data = self._load_data()
-        # Shard validation data across GPUs (each GPU evaluates different sequences)
-        if self.world_size > 1:
-            data = data[self.rank::self.world_size]
-        for x, y in data:
-            yield x, y
+    def __init__(self, hf_dataset):
+        self.dataset = hf_dataset
 
     def __len__(self):
-        if self.world_size > 1:
-            # Return per-GPU count
-            return (self.num_sequences + self.world_size - 1) // self.world_size
-        return self.num_sequences
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        tokens = self.dataset[idx]['input_ids']
+        # x is input (all but last), y is target (all but first)
+        x = tokens[:-1]
+        y = tokens[1:]
+        return x, y
+
+
+def cycle_loader(dataloader, sampler=None):
+    """Infinite iterator over dataloader, resetting sampler epoch for shuffling."""
+    import numpy as np
+    while True:
+        if sampler is not None:
+            sampler.set_epoch(np.random.randint(0, 100000))
+        for data in dataloader:
+            yield data
 
 
 def load_fineweb_edu(
-    seq_len: int = 4096,
+    seq_len: int = 1024,
     max_tokens: int | None = None,
     val_sequences: int = 100,
     subset: str = "sample-10BT",
     tokenizer_name: str = "meta-llama/Llama-2-7b-hf",
-    rank: int = 0,
-    world_size: int = 1,
+    num_workers: int = 4,
+    batch_size: int = 32,
+    distributed: bool = True,
+    cache_dir: str | None = None,
+    num_proc: int = 8,
+    data_path: str = "HuggingFaceFW/fineweb-edu",
+    load_preprocessed: bool = False,
 ):
     """
-    Load FineWeb-Edu streaming dataset for training.
+    Load FineWeb-Edu dataset with proper distributed training support.
 
     Args:
-        seq_len: Sequence length (default 4096)
-        max_tokens: Max tokens to train on (None for infinite)
-        val_sequences: Number of validation sequences to cache
+        seq_len: Sequence length (default 1024)
+        max_tokens: Approximate max tokens to load (None for full dataset)
+        val_sequences: Number of validation sequences
         subset: HuggingFace subset (default "sample-10BT")
         tokenizer_name: Tokenizer to use (default Llama-2)
-        rank: Process rank for distributed training
-        world_size: Total number of processes for sharding
+        num_workers: DataLoader workers
+        batch_size: Per-device batch size
+        distributed: Whether to use DistributedSampler
+        cache_dir: Cache directory for dataset
+        num_proc: Number of processes for preprocessing
+        data_path: Path to dataset (HF repo or local directory)
+        load_preprocessed: Whether to load preprocessed data from disk (data_path)
 
     Returns:
-        train_ds: Streaming training dataset
-        val_ds: Cached validation dataset
+        train_loader: Training dataloader (infinite iterator)
+        val_loader: Validation dataloader (infinite iterator)
         vocab_size: Tokenizer vocabulary size
+        train_sampler: Training sampler (for epoch setting)
     """
-    train_ds = FineWebEduDataset(
-        seq_len=seq_len,
+    # Estimate number of samples to load based on max_tokens
+    # Each sample is ~seq_len tokens, so max_samples ~ max_tokens / seq_len
+    if max_tokens is not None:
+        # Load extra samples to account for chunking overhead
+        max_samples = int(max_tokens / seq_len * 1.5)
+    else:
+        max_samples = None
+
+    # Load and preprocess training data
+    train_hf_dataset, vocab_size = get_fineweb_dataset(
+        seq_len=seq_len + 1,  # +1 because we split into x[:-1], y[1:]
         subset=subset,
+        split="train",
         tokenizer_name=tokenizer_name,
-        max_tokens=max_tokens,
-        rank=rank,
-        world_size=world_size,
+        max_samples=max_samples,
+        num_proc=num_proc,
+        cache_dir=cache_dir,
+        data_path=data_path,
+        load_preprocessed=load_preprocessed,
     )
 
-    val_ds = FineWebEduValidation(
-        seq_len=seq_len,
-        subset=subset,
-        tokenizer_name=tokenizer_name,
-        num_sequences=val_sequences,
-        rank=rank,
-        world_size=world_size,
+    train_dataset = FineWebEduDataset(train_hf_dataset)
+
+    # For validation, use a small fixed subset from the end of the dataset
+    # to avoid overlap with training
+    val_start = max(0, len(train_hf_dataset) - val_sequences)
+    val_hf_dataset = train_hf_dataset.select(range(val_start, len(train_hf_dataset)))
+    val_dataset = FineWebEduDataset(val_hf_dataset)
+
+    # Exclude validation samples from training
+    train_hf_dataset = train_hf_dataset.select(range(val_start))
+    train_dataset = FineWebEduDataset(train_hf_dataset)
+
+    # Create samplers for distributed training
+    if distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+    else:
+        train_sampler = None
+        val_sampler = None
+
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=(train_sampler is None),
+        drop_last=True,  # Ensure all batches are same size for distributed
+        persistent_workers=(num_workers > 0),
     )
 
-    vocab_size = train_ds.vocab_size
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        sampler=val_sampler,
+        num_workers=0,  # Validation is small, no need for workers
+        pin_memory=True,
+        shuffle=False,
+        drop_last=True,
+    )
 
-    return train_ds, val_ds, vocab_size
+    # Wrap in infinite iterators
+    train_loader = cycle_loader(train_loader, train_sampler)
+    val_loader = cycle_loader(val_loader, val_sampler)
+
+    return train_loader, val_loader, vocab_size, train_sampler

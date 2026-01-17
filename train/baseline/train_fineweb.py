@@ -1,5 +1,6 @@
 """
-Training script for FineWeb-Edu with streaming data and token-based training.
+Training script for FineWeb-Edu with proper distributed training support.
+Uses map-style dataset with DistributedSampler for reliable multi-GPU training.
 """
 
 import argparse
@@ -9,7 +10,6 @@ import csv
 from datetime import timedelta
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from accelerate import Accelerator, InitProcessGroupKwargs
 from tqdm import tqdm
 
@@ -44,18 +44,19 @@ def _wandb_init(args):
     return wandb
 
 
-def evaluate(model, dataloader, vocab_size, accelerator):
+def evaluate(model, dataloader, vocab_size, accelerator, num_batches: int = 32):
+    """Evaluate model on a fixed number of batches from the infinite iterator."""
     model.eval()
     local_losses = []
     with torch.no_grad():
-        for x, y in dataloader:
-            # Move to device (not using accelerator.prepare on dataloader)
+        for _ in range(num_batches):
+            x, y = next(dataloader)
             x, y = x.to(accelerator.device), y.to(accelerator.device)
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
             local_losses.append(loss)
 
-    # Gather once after loop to avoid hang from uneven batch counts
+    # Gather once after loop
     if local_losses:
         local_sum = torch.stack(local_losses).sum()
         local_count = torch.tensor(len(local_losses), device=accelerator.device)
@@ -91,35 +92,23 @@ def train_fineweb(args, accelerator=None):
     # Adjust batch size per GPU
     per_device_batch_size = args.batch_size // accelerator.num_processes
 
-    # Warn about num_workers with distributed training
-    if args.num_workers > 0 and accelerator.is_main_process:
-        print(f"Warning: num_workers={args.num_workers} with {accelerator.num_processes} GPUs may cause "
-              f"sharding errors if total workers ({args.num_workers * accelerator.num_processes}) exceeds "
-              f"dataset shards. Use --num_workers 0 if you encounter IndexError.")
-
-    # Load streaming dataset
-    train_ds, val_ds, vocab_size = load_fineweb_edu(
-        seq_len=args.seq_len,
-        max_tokens=args.max_tokens,
-        val_sequences=args.val_sequences,
-        subset=args.subset,
-        tokenizer_name=args.tokenizer,
-        rank=accelerator.process_index,
-        world_size=accelerator.num_processes,
-    )
-
-    # For IterableDataset, we don't shuffle in DataLoader
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=per_device_batch_size,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=per_device_batch_size,
-        num_workers=0,  # Validation is cached, no need for workers
-    )
+    # Load dataset with proper distributed sampling
+    # This returns infinite iterators with DistributedSampler for sync across ranks
+    with accelerator.main_process_first():
+        train_loader, val_loader, vocab_size, train_sampler = load_fineweb_edu(
+            seq_len=args.seq_len,
+            max_tokens=args.max_tokens,
+            val_sequences=args.val_sequences,
+            subset=args.subset,
+            tokenizer_name=args.tokenizer,
+            num_workers=args.num_workers,
+            batch_size=per_device_batch_size,
+            distributed=(accelerator.num_processes > 1),
+            num_proc=args.num_proc,
+            cache_dir=args.cache_dir,
+            data_path=args.data_path,
+            load_preprocessed=args.load_preprocessed,
+        )
 
     # Scale model size for larger sequences
     d_ff = args.d_ff if args.d_ff is not None else args.d_model * 4
@@ -183,8 +172,11 @@ def train_fineweb(args, accelerator=None):
 
     pbar = tqdm(total=total_steps, disable=not accelerator.is_main_process, desc="Training")
 
-    for x, y in train_loader:
-        # Move to device (not using accelerator.prepare on dataloader)
+    for step in range(1, total_steps + 1):
+        # Get next batch from infinite iterator
+        x, y = next(train_loader)
+
+        # Move to device
         x, y = x.to(accelerator.device), y.to(accelerator.device)
         logits = model(x)
         loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
@@ -196,7 +188,6 @@ def train_fineweb(args, accelerator=None):
         scheduler.step()
 
         running_loss += loss.item()
-        step += 1
         tokens_seen += tokens_per_step
 
         # Logging
@@ -221,7 +212,7 @@ def train_fineweb(args, accelerator=None):
                     # Compute loss variance from rolling window
                     if len(recent_losses) > 1:
                         mean_loss = sum(recent_losses) / len(recent_losses)
-                        loss_variance = sum((x - mean_loss) ** 2 for x in recent_losses) / len(recent_losses)
+                        loss_variance = sum((l - mean_loss) ** 2 for l in recent_losses) / len(recent_losses)
                     else:
                         loss_variance = 0.0
 
@@ -259,19 +250,11 @@ def train_fineweb(args, accelerator=None):
 
         pbar.update(1)
 
-        if step >= total_steps:
-            break
-
     pbar.close()
 
     # Final evaluation
     final_val_loss = evaluate(model, val_loader, vocab_size, accelerator)
     final_train_loss = train_losses[-1] if train_losses else 0.0
-
-    # Explicitly clear the train_loader to shut down workers before finalization
-    # This helps prevent GIL errors (PyGILState_Release) during process exit
-    del train_loader
-    del val_loader
 
     if accelerator.is_main_process:
         print(f"\nTraining complete. Final val loss: {final_val_loss:.4f}")
@@ -316,12 +299,20 @@ def main():
                         help="Sequence length (default 1024)")
     parser.add_argument("--subset", type=str, default="sample-10BT",
                         help="FineWeb-Edu subset (default sample-10BT)")
+    parser.add_argument("--data_path", type=str, default="HuggingFaceFW/fineweb-edu",
+                        help="Path to dataset (HF repo or local directory)")
+    parser.add_argument("--load_preprocessed", action="store_true",
+                        help="Load preprocessed data from disk (treat data_path as local folder)")
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help="Directory to cache the dataset")
     parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf",
                         help="HuggingFace tokenizer name")
     parser.add_argument("--val_sequences", type=int, default=128,
                         help="Number of validation sequences to cache")
-    parser.add_argument("--num_workers", type=int, default=0,
+    parser.add_argument("--num_workers", type=int, default=4,
                         help="DataLoader workers")
+    parser.add_argument("--num_proc", type=int, default=8,
+                        help="Number of processes for dataset preprocessing")
     parser.add_argument("--seed", type=int, default=42)
 
     # Model args - Balanced config (~50M params, good for ablations)
