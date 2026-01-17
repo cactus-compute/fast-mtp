@@ -72,12 +72,14 @@ def evaluate(model, dataloader, vocab_size, accelerator):
     return (total_sum / total_count).item()
 
 
-def train_fineweb(args):
+def train_fineweb(args, accelerator=None):
     # Set seed for reproducibility
     from accelerate.utils import set_seed
     set_seed(args.seed)
 
-    accelerator = Accelerator(mixed_precision=args.mixed_precision)
+    if accelerator is None:
+        accelerator = Accelerator(mixed_precision=args.mixed_precision)
+    
     wandb = _wandb_init(args) if accelerator.is_main_process else None
 
     # Adjust batch size per GPU

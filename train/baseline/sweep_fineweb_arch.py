@@ -11,7 +11,7 @@ import os
 import csv
 import argparse
 from types import SimpleNamespace
-import torch
+from accelerate import Accelerator
 from train.baseline.train_fineweb import train_fineweb
 
 
@@ -67,7 +67,10 @@ def main():
                         help="Specific configs to run (e.g., A_deep_narrow B_balanced)")
     args_cli = parser.parse_args()
 
-    os.makedirs("runs", exist_ok=True)
+    accelerator = Accelerator(mixed_precision=args_cli.mixed_precision)
+
+    if accelerator.is_main_process:
+        os.makedirs("runs", exist_ok=True)
 
     results_path = os.path.join("runs", "fineweb_arch_sweep.csv")
     header = [
@@ -75,7 +78,8 @@ def main():
         "max_tokens", "seq_len", "batch_size", "lr", "optimizer",
         "final_train_loss", "final_val_loss", "params"
     ]
-    write_header = not os.path.exists(results_path)
+    
+    write_header = not os.path.exists(results_path) and accelerator.is_main_process
 
     # Select which configs to run
     if args_cli.configs:
@@ -86,92 +90,98 @@ def main():
     best_val_loss = float("inf")
     best_config = None
 
-    with open(results_path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(header)
-
-        for config_name, arch in configs_to_run.items():
+    for config_name, arch in configs_to_run.items():
+        if accelerator.is_main_process:
             print(f"\n{'='*60}")
             print(f"Running config: {config_name}")
             print(f"  d_model={arch['d_model']}, n_heads={arch['n_heads']}, "
                   f"n_layers={arch['n_layers']}, d_ff={arch['d_ff']}")
             print(f"{'='*60}\n")
 
-            # Select appropriate LR based on optimizer
-            effective_lr = args_cli.muon_lr if args_cli.optimizer == "muon" else args_cli.lr
+        # Select appropriate LR based on optimizer
+        effective_lr = args_cli.muon_lr if args_cli.optimizer == "muon" else args_cli.lr
 
-            args = SimpleNamespace(
-                max_tokens=args_cli.max_tokens,
-                seq_len=args_cli.seq_len,
-                subset=args_cli.subset,
-                tokenizer=args_cli.tokenizer,
-                val_sequences=args_cli.val_sequences,
-                num_workers=args_cli.num_workers,
-                seed=42,
-                d_model=arch["d_model"],
-                n_heads=arch["n_heads"],
-                n_layers=arch["n_layers"],
-                d_ff=arch["d_ff"],
-                optimizer=args_cli.optimizer,
-                batch_size=args_cli.batch_size,
-                lr=args_cli.lr,
-                muon_lr=args_cli.muon_lr,
-                weight_decay=args_cli.weight_decay,
-                mixed_precision=args_cli.mixed_precision,
-                log_interval=args_cli.log_interval,
-                eval_interval=args_cli.eval_interval,
-                save_checkpoints=False,
-                wandb=args_cli.wandb,
-                wandb_project=args_cli.wandb_project,
-                wandb_run_name=f"arch_{config_name}_{args_cli.optimizer}_{args_cli.max_tokens // 1_000_000}M",
-                wandb_entity=args_cli.wandb_entity,
-                wandb_mode=args_cli.wandb_mode,
-            )
+        args = SimpleNamespace(
+            max_tokens=args_cli.max_tokens,
+            seq_len=args_cli.seq_len,
+            subset=args_cli.subset,
+            tokenizer=args_cli.tokenizer,
+            val_sequences=args_cli.val_sequences,
+            num_workers=args_cli.num_workers,
+            seed=42,
+            d_model=arch["d_model"],
+            n_heads=arch["n_heads"],
+            n_layers=arch["n_layers"],
+            d_ff=arch["d_ff"],
+            optimizer=args_cli.optimizer,
+            batch_size=args_cli.batch_size,
+            lr=args_cli.lr,
+            muon_lr=args_cli.muon_lr,
+            weight_decay=args_cli.weight_decay,
+            mixed_precision=args_cli.mixed_precision,
+            log_interval=args_cli.log_interval,
+            eval_interval=args_cli.eval_interval,
+            save_checkpoints=False,
+            wandb=args_cli.wandb,
+            wandb_project=args_cli.wandb_project,
+            wandb_run_name=f"arch_{config_name}_{args_cli.optimizer}_{args_cli.max_tokens // 1_000_000}M",
+            wandb_entity=args_cli.wandb_entity,
+            wandb_mode=args_cli.wandb_mode,
+        )
 
-            final_train_loss, final_val_loss = train_fineweb(args)
+        final_train_loss, final_val_loss = train_fineweb(args, accelerator=accelerator)
 
-            # Estimate param count
-            vocab_size = 32000  # LLaMA tokenizer
-            embed_params = vocab_size * arch["d_model"]
-            attn_params = 4 * arch["d_model"] ** 2
-            ff_params = 3 * arch["d_model"] * arch["d_ff"]  # SwiGLU
-            layer_params = attn_params + ff_params
-            total_params = embed_params + arch["n_layers"] * layer_params
+        # Estimate param count
+        vocab_size = 32000  # LLaMA tokenizer
+        embed_params = vocab_size * arch["d_model"]
+        attn_params = 4 * arch["d_model"] ** 2
+        ff_params = 3 * arch["d_model"] * arch["d_ff"]  # SwiGLU
+        layer_params = attn_params + ff_params
+        total_params = embed_params + arch["n_layers"] * layer_params
 
-            row = [
-                config_name,
-                arch["d_model"],
-                arch["n_heads"],
-                arch["n_layers"],
-                arch["d_ff"],
-                args_cli.max_tokens,
-                args_cli.seq_len,
-                args_cli.batch_size,
-                effective_lr,
-                args_cli.optimizer,
-                final_train_loss,
-                final_val_loss,
-                total_params,
-            ]
-            writer.writerow(row)
-            f.flush()
+        if accelerator.is_main_process:
+            with open(results_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(header)
+                    write_header = False # Only write once
+                
+                row = [
+                    config_name,
+                    arch["d_model"],
+                    arch["n_heads"],
+                    arch["n_layers"],
+                    arch["d_ff"],
+                    args_cli.max_tokens,
+                    args_cli.seq_len,
+                    args_cli.batch_size,
+                    effective_lr,
+                    args_cli.optimizer,
+                    final_train_loss,
+                    final_val_loss,
+                    total_params,
+                ]
+                writer.writerow(row)
+                f.flush()
 
             print(f"\nConfig {config_name}: val_loss={final_val_loss:.4f}, params={total_params:,}")
 
-            if final_val_loss < best_val_loss:
-                best_val_loss = final_val_loss
-                best_config = config_name
+        if final_val_loss < best_val_loss:
+            best_val_loss = final_val_loss
+            best_config = config_name
 
-    print(f"\n{'='*60}")
-    print(f"SWEEP COMPLETE")
-    print(f"Best config: {best_config} with val_loss={best_val_loss:.4f}")
-    print(f"Results saved to: {results_path}")
-    print(f"{'='*60}")
+    if accelerator.is_main_process:
+        print(f"\n{'='*60}")
+        print(f"SWEEP COMPLETE")
+        print(f"Best config: {best_config} with val_loss={best_val_loss:.4f}")
+        print(f"Results saved to: {results_path}")
+        print(f"{'='*60}")
 
-    # Clean up distributed process group to avoid GIL errors on exit
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    # Final cleanup to prevent threading errors during shutdown
+    accelerator.wait_for_everyone()
+    import torch.distributed as dist
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
